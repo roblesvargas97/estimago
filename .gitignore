@@ -1,0 +1,31 @@
+# === Go ===
+# Compiled binaries
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Build and temporary folders
+bin/
+build/
+dist/
+tmp/
+vendor/
+
+# === Logs and output files ===
+*.log
+
+# === Local configuration ===
+.env
+.air.toml
+
+# === IDE and editor settings ===
+.vscode/
+.idea/
+*.swp
+
+# === System files ===
+.DS_Store
+Thumbs.db
