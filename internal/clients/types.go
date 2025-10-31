@@ -8,15 +8,16 @@ import (
 )
 
 type Client struct {
-	ID        uuid.UUID  `json:"id"`
-	Name      string     `json:"name"`
-	Phone     *string    `json:"phone,omitempty"`
-	Email     *string    `email,omitempty"`
-	CreatedAt time.Time  `json:"created_at"`
-	UpdatedAt time.Time  `json:"updated_at"`
+	ID        uuid.UUID       `json:"id"`
+	Name      string          `json:"name"`
+	Phone     *string         `json:"phone,omitempty"`
+	Email     *string         `json:"email,omitempty"`
+	CreatedAt time.Time       `json:"created_at"`
+	UpdatedAt time.Time       `json:"updated_at"`
+	Meta      json.RawMessage `json:"meta"`
 }
 
-type CreateClientInput struct {
+type CreateClientIn struct {
 	Name  string           `json:"name"`
 	Email *string          `json:"email,omitempty"`
 	Phone *string          `json:"phone,omitempty"`

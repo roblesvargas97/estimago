@@ -1,4 +1,4 @@
-package http
+package utils
 
 import (
 	"encoding/json"
@@ -8,33 +8,53 @@ import (
 )
 
 // DecodeJSON - Safely decodes JSON request body into provided struct
-// Purpose: Parses HTTP request body JSON with security measures and validation
+// Purpose:
+//
+//	Parses an HTTP request body as JSON with security measures and validation.
+//
 // Advantages:
 //   - Memory protection with MaxBytesReader (prevents DoS attacks)
 //   - Strict field validation with DisallowUnknownFields
 //   - Comprehensive error handling for different JSON parsing failures
-//   - Prevents multiple JSON objects in single request
+//   - Prevents multiple JSON objects in a single request
 //
 // Weaknesses:
 //   - Fixed 1MB limit (not configurable)
 //   - Error messages could be more user-friendly
 //   - No support for streaming large JSON payloads
-func DecodeJSON(r *http.Request, v any) error {
+//
+// Parameters:
+//   - w: http.ResponseWriter (used by MaxBytesReader to enforce body size limits)
+//   - r: *http.Request containing the JSON body
+//   - v: pointer to a struct or map where decoded data will be stored
+//
+// Security Notes:
+//   - The MaxBytesReader ensures payloads larger than 1MB are rejected before decoding.
+//   - DisallowUnknownFields enforces strict schema matching, avoiding accidental data injection.
+//
+// Example:
+//
+//	var input CreateUserInput
+//	if err := httputil.DecodeJSON(w, r, &input); err != nil {
+//	    httputil.WriteErr(w, http.StatusBadRequest, "invalid_json", err.Error())
+//	    return
+//	}
+//
+// Behavior:
+//   - Returns an error if:
+//   - The body is empty
+//   - The JSON contains fields not defined in the struct
+//   - The JSON contains multiple top-level objects
+//   - A field type does not match the expected Go type
+func DecodeJSON(w http.ResponseWriter, r *http.Request, v any) error {
 
-	// Security measure: Limit request body size to prevent memory exhaustion
-	// Advantages: Prevents DoS attacks via large payloads
-	// Weaknesses: Fixed limit, might be too restrictive for some use cases
 	const maxBytes = 1 << 20 // 1 MB
-	r.Body = http.MaxBytesReader(nil, r.Body, maxBytes)
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+	defer r.Body.Close()
 
-	// JSON decoder with strict validation
-	// Advantages: Catches unexpected fields, maintains data integrity
-	// Weaknesses: Less flexible, might reject valid but extended JSON
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
-	// Comprehensive error handling for JSON decoding failures
-	// Advantages: Specific error messages for different failure types
-	// Weaknesses: Error messages might expose internal structure to clients
+
 	if err := dec.Decode(v); err != nil {
 		var ute *json.UnmarshalTypeError
 		switch {
@@ -46,12 +66,11 @@ func DecodeJSON(r *http.Request, v any) error {
 			return err
 		}
 	}
-	// Security check: Prevent multiple JSON objects in single request
-	// Advantages: Prevents confusion and potential security issues
-	// Weaknesses: Doesn't support JSON streaming or arrays of objects
+
 	if dec.More() {
 		return errors.New("multiple JSON objects in body")
 	}
+
 	return nil
 }
 
