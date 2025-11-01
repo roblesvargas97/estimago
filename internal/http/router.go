@@ -3,12 +3,16 @@ package http
 import (
 	"context"
 	"net/http"
+	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/roblesvargas97/estimago/internal/auth"
 	"github.com/roblesvargas97/estimago/internal/clients"
 	"github.com/roblesvargas97/estimago/internal/quotes"
 )
@@ -56,6 +60,20 @@ func NewRouter(pool *pgxpool.Pool) *chi.Mux {
 		w.Write([]byte(`{"status":"ok"}`))
 	})
 
+	authCfg := auth.Config{
+		JWTSecret:   strings.TrimSpace(os.Getenv("AUTH_JWT_SECRET")),
+		JWTTTLHours: parseEnvInt(os.Getenv("AUTH_JWT_TTL_HOURS"), 24),
+	}
+
+	r.Route("/api/v1/auth", func(sub chi.Router) {
+		auth.RegisterRoutes(sub, pool, authCfg)
+	})
+
+	r.Group(func(priv chi.Router) {
+		priv.Use(auth.JWTMiddleware(authCfg))
+		priv.Get("/api/v1/me", auth.MeHandler(pool))
+	})
+
 	r.Route("/api/v1/clients", func(r chi.Router) {
 		r.Post("/", clients.PostClient(pool))
 		r.Get("/", clients.ListClients(pool))
@@ -75,4 +93,18 @@ func NewRouter(pool *pgxpool.Pool) *chi.Mux {
 		return nil
 	})
 	return r
+}
+
+func parseEnvInt(value string, fallback int) int {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return fallback
+	}
+
+	n, err := strconv.Atoi(trimmed)
+	if err != nil || n <= 0 {
+		return fallback
+	}
+
+	return n
 }
