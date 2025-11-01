@@ -9,17 +9,16 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/roblesvargas97/estimago/internal/auth"
 	"github.com/roblesvargas97/estimago/internal/config"
 	"github.com/roblesvargas97/estimago/internal/db"
 	httpx "github.com/roblesvargas97/estimago/internal/http"
 )
 
 func main() {
-	// 1️⃣ Cargar configuración
 	cfg := config.Load()
 	port := cfg.Port
 
-	// 2️⃣ Crear conexión a la base de datos
 	ctx := context.Background()
 	pool, err := db.NewPool(ctx, cfg.DatabaseURL)
 	if err != nil {
@@ -27,17 +26,19 @@ func main() {
 	}
 	defer pool.Close()
 
-	// 3️⃣ Crear router principal (Chi)
-	r := httpx.NewRouter(pool)
+	authCfg := auth.Config{
+		JWTSecret:   cfg.AuthJWTSecret,
+		JWTTTLHours: cfg.AuthJWTTTLHrs,
+	}
 
-	// 4️⃣ Servidor HTTP
+	r := httpx.NewRouter(pool, authCfg)
+
 	srv := &http.Server{
 		Addr:              ":" + port,
 		Handler:           r,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
-	// 5️⃣ Goroutine para escuchar
 	go func() {
 		log.Printf("🚀 Servidor iniciado en http://localhost:%s", port)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -45,14 +46,12 @@ func main() {
 		}
 	}()
 
-	// 6️⃣ Esperar señal para apagar
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
 
 	log.Println("🛑 Apagando servidor...")
 
-	// 7️⃣ Cierre elegante
 	ctxShutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 

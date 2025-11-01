@@ -4,4 +4,8 @@ dev:
 
 .PHONY: migrate
 migrate:
-	@bash -c 'set -a; source .env; set +a; psql "$$DATABASE_URL" -f migrations/001_init.sql'
+	@bash -c 'set -a; source .env; set +a; \
+	for f in migrations/*.sql; do \
+	  echo "Running $$f"; \
+	  psql "$$DATABASE_URL" -f $$f || exit 1; \
+	done'

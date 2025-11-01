@@ -3,7 +3,6 @@ package http
 import (
 	"context"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -17,8 +16,7 @@ import (
 	"github.com/roblesvargas97/estimago/internal/quotes"
 )
 
-func NewRouter(pool *pgxpool.Pool) *chi.Mux {
-
+func NewRouter(pool *pgxpool.Pool, authCfg auth.Config) *chi.Mux {
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID, middleware.RealIP, middleware.Logger, middleware.Recoverer)
@@ -60,11 +58,6 @@ func NewRouter(pool *pgxpool.Pool) *chi.Mux {
 		w.Write([]byte(`{"status":"ok"}`))
 	})
 
-	authCfg := auth.Config{
-		JWTSecret:   strings.TrimSpace(os.Getenv("AUTH_JWT_SECRET")),
-		JWTTTLHours: parseEnvInt(os.Getenv("AUTH_JWT_TTL_HOURS"), 24),
-	}
-
 	r.Route("/api/v1/auth", func(sub chi.Router) {
 		auth.RegisterRoutes(sub, pool, authCfg)
 	})
@@ -92,6 +85,7 @@ func NewRouter(pool *pgxpool.Pool) *chi.Mux {
 		println(method, route)
 		return nil
 	})
+
 	return r
 }
 
