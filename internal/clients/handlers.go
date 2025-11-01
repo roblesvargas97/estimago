@@ -2,6 +2,7 @@ package clients
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -63,6 +64,76 @@ func PostClient(pool *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 		utils.WriteJSON(w, http.StatusCreated, c)
+
+	}
+
+}
+
+func ListClients(pool *pgxpool.Pool) http.HandlerFunc {
+
+	return func(w http.ResponseWriter, r *http.Request) {
+
+		q := strings.TrimSpace(r.URL.Query().Get("q"))
+
+		page, _ := strconv.Atoi(utils.DefaultIfEmpty(r.URL.Query().Get("page"), "1"))
+
+		limit, _ := strconv.Atoi(utils.DefaultIfEmpty(r.URL.Query().Get("limit"), "20"))
+
+		if limit <= 0 || limit > 100 {
+			limit = 20
+		}
+
+		offset := (page - 1) * limit
+
+		var total int
+
+		if q == "" {
+
+			if err := pool.QueryRow(r.Context(), `SELECT COUNT(*) FROM clients`).Scan(&total); err != nil {
+				utils.WriteErr(w, http.StatusInternalServerError, "db_error", err.Error())
+				return
+			} else {
+				if err := pool.QueryRow(r.Context(), `SELECT COUNT(*) FROM clients WHERE name ILIKE '%' || $1 || '%' OR email ILIKE '%' || $1 || '%'`, q).Scan(&total); err != nil {
+					utils.WriteErr(w, http.StatusInternalServerError, "db_error", err.Error())
+					return
+				}
+			}
+
+		}
+
+		sql := `SELECT id, name, email, phone, meta, created_at, updated_at
+		FROM clients
+		`
+		args := []any{}
+
+		if q != "" {
+			sql += ` WHERE name ILIKE '%' || $1 || '%' OR email ILIKE '%' || $1 || '%' `
+			args = append(args, q)
+		}
+
+		sql += ` ORDER BY created_at DESC LIMIT $` + strconv.Itoa(len(args)+1) + ` OFFSET $` + strconv.Itoa(len(args)+2)
+		args = append(args, limit, offset)
+
+		rows, err := pool.Query(r.Context(), sql, args...)
+
+		if err != nil {
+			utils.WriteErr(w, http.StatusInternalServerError, "db_error", err.Error())
+			return
+		}
+		defer rows.Close()
+
+		outs := []Client{}
+
+		for rows.Next() {
+			var c Client
+			if err := rows.Scan(&c.ID, &c.Name, &c.Email, &c.Phone, &c.Meta, &c.CreatedAt, &c.UpdatedAt); err != nil {
+				utils.WriteErr(w, http.StatusInternalServerError, "db_error", err.Error())
+				return
+			}
+			outs = append(outs, c)
+		}
+		w.Header().Set("X-Total-Count", strconv.Itoa(total))
+		utils.WriteJSON(w, http.StatusOK, outs)
 
 	}
 
