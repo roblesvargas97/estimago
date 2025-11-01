@@ -10,6 +10,7 @@ import (
 	"github.com/go-chi/cors"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/roblesvargas97/estimago/internal/clients"
+	"github.com/roblesvargas97/estimago/internal/quotes"
 )
 
 func NewRouter(pool *pgxpool.Pool) *chi.Mux {
@@ -24,6 +25,18 @@ func NewRouter(pool *pgxpool.Pool) *chi.Mux {
 		ExposedHeaders: []string{"*"},
 		MaxAge:         300,
 	}))
+
+	r.MethodNotAllowed(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		w.Write([]byte(`{"error":"method_not_allowed","path":"` + r.URL.Path + `","method":"` + r.Method + `"}`))
+	})
+
+	r.NotFound(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"error":"not_found","path":"` + r.URL.Path + `","method":"` + r.Method + `"}`))
+	})
 
 	r.Get("/api/v1/hello", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -49,5 +62,13 @@ func NewRouter(pool *pgxpool.Pool) *chi.Mux {
 		r.Get("/{id}", clients.GetClient(pool))
 	})
 
+	r.Route("/api/v1/quotes", func(r chi.Router) {
+		r.Post("/", quotes.PostQuote(pool))
+	})
+
+	chi.Walk(r, func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
+		println(method, route)
+		return nil
+	})
 	return r
 }
