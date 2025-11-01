@@ -2,12 +2,16 @@ package quotes
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"net/http"
 	"strconv"
 	"strings"
 
+	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/roblesvargas97/estimago/internal/utils"
 )
@@ -104,6 +108,41 @@ func PostQuote(pool *pgxpool.Pool) http.HandlerFunc {
 
 		utils.WriteJSON(w, http.StatusCreated, q)
 
+	}
+}
+
+func GetQuote(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		idStr := strings.TrimSpace(chi.URLParam(r, "id"))
+
+		id, err := uuid.Parse(idStr)
+		if err != nil {
+			utils.WriteErr(w, http.StatusBadRequest, "validation_error", "invalid uuid")
+			return
+		}
+
+		var q Quote
+
+		err = pool.QueryRow(r.Context(), `
+                        SELECT id, client_id, items, labor_hours, labor_rate, margin_pct, tax_pct,
+                               subtotal, total, currency, notes, public_id, status, created_at, updated_at
+                        FROM quotes WHERE id=$1
+                `, id).Scan(
+			&q.ID, &q.ClientID, &q.Items, &q.LaborHours, &q.LaborRate, &q.MarginPct, &q.TaxPct,
+			&q.Subtotal, &q.Total, &q.Currency, &q.Notes, &q.PublicID, &q.Status, &q.CreatedAt, &q.UpdatedAt,
+		)
+
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				utils.WriteErr(w, http.StatusNotFound, "not_found", "quote not found")
+				return
+			}
+
+			utils.WriteErr(w, http.StatusInternalServerError, "db_error", err.Error())
+			return
+		}
+
+		utils.WriteJSON(w, http.StatusOK, q)
 	}
 }
 
