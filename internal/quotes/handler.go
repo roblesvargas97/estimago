@@ -4,10 +4,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math/big"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -108,6 +110,166 @@ func PostQuote(pool *pgxpool.Pool) http.HandlerFunc {
 
 		utils.WriteJSON(w, http.StatusCreated, q)
 
+	}
+}
+
+func ListQuotes(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query()
+
+		statusParam := strings.TrimSpace(query.Get("status"))
+		var statuses []string
+		if statusParam != "" {
+			rawStatuses := strings.Split(statusParam, ",")
+			allowed := map[string]struct{}{"draft": {}, "sent": {}, "accepted": {}, "rejected": {}}
+			for _, st := range rawStatuses {
+				trimmed := strings.ToLower(strings.TrimSpace(st))
+				if trimmed == "" {
+					continue
+				}
+				if _, ok := allowed[trimmed]; !ok {
+					utils.WriteErr(w, http.StatusBadRequest, "validation_error", "invalid status filter")
+					return
+				}
+				statuses = append(statuses, trimmed)
+			}
+		}
+
+		clientIDParam := strings.TrimSpace(query.Get("client_id"))
+		var clientID uuid.UUID
+		var clientIDFilter bool
+		if clientIDParam != "" {
+			parsed, err := uuid.Parse(clientIDParam)
+			if err != nil {
+				utils.WriteErr(w, http.StatusBadRequest, "validation_error", "invalid client_id")
+				return
+			}
+			clientID = parsed
+			clientIDFilter = true
+		}
+
+		notesQuery := strings.TrimSpace(query.Get("q"))
+
+		createdFromParam := strings.TrimSpace(query.Get("created_from"))
+		var createdFrom time.Time
+		if createdFromParam != "" {
+			parsed, err := parseTime(createdFromParam)
+			if err != nil {
+				utils.WriteErr(w, http.StatusBadRequest, "validation_error", "invalid created_from")
+				return
+			}
+			createdFrom = parsed
+		}
+
+		createdToParam := strings.TrimSpace(query.Get("created_to"))
+		var createdTo time.Time
+		if createdToParam != "" {
+			parsed, err := parseTime(createdToParam)
+			if err != nil {
+				utils.WriteErr(w, http.StatusBadRequest, "validation_error", "invalid created_to")
+				return
+			}
+			createdTo = parsed
+		}
+
+		page, _ := strconv.Atoi(utils.DefaultIfEmpty(query.Get("page"), "1"))
+		if page <= 0 {
+			page = 1
+		}
+
+		limit, _ := strconv.Atoi(utils.DefaultIfEmpty(query.Get("limit"), "20"))
+		if limit <= 0 || limit > 100 {
+			limit = 20
+		}
+
+		offset := (page - 1) * limit
+
+		conditions := []string{}
+		args := []any{}
+
+		if len(statuses) > 0 {
+			conditions = append(conditions, fmt.Sprintf("status = ANY($%d::text[])", len(args)+1))
+			args = append(args, statuses)
+		}
+
+		if clientIDFilter {
+			conditions = append(conditions, fmt.Sprintf("client_id = $%d", len(args)+1))
+			args = append(args, clientID)
+		}
+
+		if notesQuery != "" {
+			conditions = append(conditions, fmt.Sprintf("COALESCE(notes, '') ILIKE '%%' || $%d || '%%'", len(args)+1))
+			args = append(args, notesQuery)
+		}
+
+		if !createdFrom.IsZero() {
+			conditions = append(conditions, fmt.Sprintf("created_at >= $%d", len(args)+1))
+			args = append(args, createdFrom)
+		}
+
+		if !createdTo.IsZero() {
+			conditions = append(conditions, fmt.Sprintf("created_at <= $%d", len(args)+1))
+			args = append(args, createdTo)
+		}
+
+		baseSQL := "FROM quotes"
+		if len(conditions) > 0 {
+			baseSQL += " WHERE " + strings.Join(conditions, " AND ")
+		}
+
+		var total int
+		countSQL := "SELECT COUNT(*) " + baseSQL
+		if err := pool.QueryRow(r.Context(), countSQL, args...).Scan(&total); err != nil {
+			utils.WriteErr(w, http.StatusInternalServerError, "db_error", err.Error())
+			return
+		}
+
+		dataSQL := "SELECT id, client_id, items, labor_hours, labor_rate, margin_pct, tax_pct, " +
+			"subtotal, total, currency, notes, public_id, status, created_at, updated_at " + baseSQL +
+			fmt.Sprintf(" ORDER BY created_at DESC LIMIT $%d OFFSET $%d", len(args)+1, len(args)+2)
+
+		dataArgs := append(append([]any{}, args...), limit, offset)
+
+		rows, err := pool.Query(r.Context(), dataSQL, dataArgs...)
+		if err != nil {
+			utils.WriteErr(w, http.StatusInternalServerError, "db_error", err.Error())
+			return
+		}
+		defer rows.Close()
+
+		outs := []Quote{}
+		for rows.Next() {
+			var q Quote
+			if err := rows.Scan(
+				&q.ID,
+				&q.ClientID,
+				&q.Items,
+				&q.LaborHours,
+				&q.LaborRate,
+				&q.MarginPct,
+				&q.TaxPct,
+				&q.Subtotal,
+				&q.Total,
+				&q.Currency,
+				&q.Notes,
+				&q.PublicID,
+				&q.Status,
+				&q.CreatedAt,
+				&q.UpdatedAt,
+			); err != nil {
+				utils.WriteErr(w, http.StatusInternalServerError, "db_error", err.Error())
+				return
+			}
+			outs = append(outs, q)
+		}
+
+		if err := rows.Err(); err != nil {
+			utils.WriteErr(w, http.StatusInternalServerError, "db_error", err.Error())
+			return
+		}
+
+		w.Header().Set("X-Total-Count", strconv.Itoa(total))
+		utils.WriteJSON(w, http.StatusOK, outs)
 	}
 }
 
@@ -421,6 +583,78 @@ func PatchQuote(pool *pgxpool.Pool) http.HandlerFunc {
 
 		utils.WriteJSON(w, http.StatusOK, q)
 	}
+}
+
+func SendQuote(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		idStr := strings.TrimSpace(chi.URLParam(r, "id"))
+
+		id, err := uuid.Parse(idStr)
+		if err != nil {
+			utils.WriteErr(w, http.StatusBadRequest, "validation_error", "invalid uuid")
+			return
+		}
+
+		var currentStatus string
+		err = pool.QueryRow(r.Context(), `SELECT status FROM quotes WHERE id=$1`, id).Scan(&currentStatus)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				utils.WriteErr(w, http.StatusNotFound, "not_found", "quote not found")
+				return
+			}
+			utils.WriteErr(w, http.StatusInternalServerError, "db_error", err.Error())
+			return
+		}
+
+		if currentStatus == "sent" || currentStatus == "accepted" {
+			utils.WriteErr(w, http.StatusConflict, "conflict", "quote already sent")
+			return
+		}
+
+		var q Quote
+		err = pool.QueryRow(r.Context(), `
+                        UPDATE quotes
+                        SET status='sent', updated_at=now()
+                        WHERE id=$1
+                        RETURNING id, client_id, items, labor_hours, labor_rate, margin_pct, tax_pct,
+                                  subtotal, total, currency, notes, public_id, status, created_at, updated_at
+                `, id).Scan(
+			&q.ID,
+			&q.ClientID,
+			&q.Items,
+			&q.LaborHours,
+			&q.LaborRate,
+			&q.MarginPct,
+			&q.TaxPct,
+			&q.Subtotal,
+			&q.Total,
+			&q.Currency,
+			&q.Notes,
+			&q.PublicID,
+			&q.Status,
+			&q.CreatedAt,
+			&q.UpdatedAt,
+		)
+
+		if err != nil {
+			utils.WriteErr(w, http.StatusInternalServerError, "db_error", err.Error())
+			return
+		}
+
+		log.Printf("Quote %s sent to client", id.String())
+
+		utils.WriteJSON(w, http.StatusOK, q)
+	}
+}
+
+func parseTime(v string) (time.Time, error) {
+	layouts := []string{time.RFC3339, "2006-01-02"}
+	for _, layout := range layouts {
+		if t, err := time.Parse(layout, v); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("invalid time")
 }
 
 // calcTotals - Calculates quote totals with precise decimal arithmetic for financial accuracy
