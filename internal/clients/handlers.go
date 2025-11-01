@@ -1,10 +1,14 @@
 package clients
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
 
+	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/roblesvargas97/estimago/internal/utils"
@@ -134,6 +138,38 @@ func ListClients(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 		w.Header().Set("X-Total-Count", strconv.Itoa(total))
 		utils.WriteJSON(w, http.StatusOK, outs)
+
+	}
+
+}
+
+func GetClient(pool *pgxpool.Pool) http.HandlerFunc {
+
+	return func(w http.ResponseWriter, r *http.Request) {
+
+		idStr := strings.TrimSpace(chi.URLParam(r, "id"))
+
+		id, err := uuid.Parse(idStr)
+		if err != nil {
+			utils.WriteErr(w, http.StatusBadRequest, "validation_error", "invalid uuid")
+			return
+		}
+
+		var c Client
+
+		err = pool.QueryRow(r.Context(), `SELECT id,name,email,phone,meta,created_at,updated_at FROM clients WHERE id=$1`, id).Scan(&c.ID, &c.Name, &c.Email, &c.Phone, &c.Meta, &c.CreatedAt, &c.UpdatedAt)
+
+		if errors.Is(err, context.DeadlineExceeded) || err != nil {
+			utils.WriteErr(w, http.StatusInternalServerError, "not_found", "client not found")
+			return
+		}
+
+		if err != nil {
+			utils.WriteErr(w, http.StatusInternalServerError, "db_error", err.Error())
+			return
+		}
+
+		utils.WriteJSON(w, http.StatusOK, c)
 
 	}
 

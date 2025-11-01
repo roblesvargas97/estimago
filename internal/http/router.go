@@ -46,6 +46,7 @@ func NewRouter(pool *pgxpool.Pool) *chi.Mux {
 	r.Route("/api/v1/clients", func(r chi.Router) {
 		r.Post("/", clients.PostClient(pool))
 		r.Get("/", clients.ListClients(pool))
+		r.Get("/{id}", clients.GetClient(pool))
 	})
 
 	return r
