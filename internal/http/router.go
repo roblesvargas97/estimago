@@ -64,8 +64,10 @@ func NewRouter(pool *pgxpool.Pool) *chi.Mux {
 
 	r.Route("/api/v1/quotes", func(r chi.Router) {
 		r.Post("/", quotes.PostQuote(pool))
+		r.Get("/", quotes.ListQuotes(pool))
 		r.Get("/{id}", quotes.GetQuote(pool))
 		r.Patch("/{id}", quotes.PatchQuote(pool))
+		r.Post("/{id}/send", quotes.SendQuote(pool))
 	})
 
 	chi.Walk(r, func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
