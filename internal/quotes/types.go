@@ -27,6 +27,18 @@ type CreateQuoteIn struct {
 	Notes      *string     `json:"notes"`
 }
 
+type UpdateQuoteIn struct {
+	ClientID   *uuid.UUID       `json:"client_id"`
+	Items      *[]QuoteItem     `json:"items"`
+	LaborHours *float64         `json:"labor_hours"`
+	LaborRate  *float64         `json:"labor_rate"`
+	MarginPct  *float64         `json:"margin_pct"`
+	TaxPct     *float64         `json:"tax_pct"`
+	Currency   *string          `json:"currency"`
+	Notes      *json.RawMessage `json:"notes"`
+	Status     *string          `json:"status"`
+}
+
 type Quote struct {
 	ID         uuid.UUID       `json:"id"`
 	ClientID   *uuid.UUID      `json:"client_id"`

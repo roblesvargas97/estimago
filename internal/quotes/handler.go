@@ -146,6 +146,283 @@ func GetQuote(pool *pgxpool.Pool) http.HandlerFunc {
 	}
 }
 
+func PatchQuote(pool *pgxpool.Pool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		idStr := strings.TrimSpace(chi.URLParam(r, "id"))
+
+		id, err := uuid.Parse(idStr)
+		if err != nil {
+			utils.WriteErr(w, http.StatusBadRequest, "validation_error", "invalid uuid")
+			return
+		}
+
+		var in UpdateQuoteIn
+
+		if err := utils.DecodeJSON(w, r, &in); err != nil {
+			utils.WriteErr(w, http.StatusBadRequest, "bad_json", err.Error())
+			return
+		}
+
+		notesProvided := in.Notes != nil
+
+		if in.ClientID == nil && in.Items == nil && in.LaborHours == nil && in.LaborRate == nil &&
+			in.MarginPct == nil && in.TaxPct == nil && in.Currency == nil && !notesProvided && in.Status == nil {
+			utils.WriteErr(w, http.StatusBadRequest, "validation_error", "no fields to update")
+			return
+		}
+
+		var (
+			clientID  *uuid.UUID
+			itemsJSON json.RawMessage
+			laborHours,
+			laborRate,
+			marginPct,
+			taxPct float64
+			currency string
+			notes    *string
+			status   string
+		)
+
+		err = pool.QueryRow(r.Context(), `
+                        SELECT client_id, items, labor_hours, labor_rate, margin_pct, tax_pct,
+                               currency, notes, status
+                        FROM quotes WHERE id=$1
+                `, id).Scan(
+			&clientID, &itemsJSON, &laborHours, &laborRate, &marginPct, &taxPct,
+			&currency, &notes, &status,
+		)
+
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				utils.WriteErr(w, http.StatusNotFound, "not_found", "quote not found")
+				return
+			}
+			utils.WriteErr(w, http.StatusInternalServerError, "db_error", err.Error())
+			return
+		}
+
+		effectiveClientID := clientID
+		if in.ClientID != nil {
+			effectiveClientID = in.ClientID
+		}
+
+		var items []QuoteItem
+		if err := json.Unmarshal(itemsJSON, &items); err != nil {
+			utils.WriteErr(w, http.StatusInternalServerError, "parse_error", "stored items invalid JSON")
+			return
+		}
+
+		effectiveItems := items
+		if in.Items != nil {
+			if len(*in.Items) == 0 {
+				utils.WriteErr(w, http.StatusUnprocessableEntity, "validation_error", "items: at least one item is required")
+				return
+			}
+			effectiveItems = *in.Items
+		}
+
+		effectiveLaborHours := laborHours
+		if in.LaborHours != nil {
+			if *in.LaborHours < 0 {
+				utils.WriteErr(w, http.StatusUnprocessableEntity, "validation_error", "labor_hours must be >= 0")
+				return
+			}
+			effectiveLaborHours = *in.LaborHours
+		}
+
+		effectiveLaborRate := laborRate
+		if in.LaborRate != nil {
+			if *in.LaborRate < 0 {
+				utils.WriteErr(w, http.StatusUnprocessableEntity, "validation_error", "labor_rate must be >= 0")
+				return
+			}
+			effectiveLaborRate = *in.LaborRate
+		}
+
+		effectiveMargin := marginPct
+		if in.MarginPct != nil {
+			if *in.MarginPct < 0 || *in.MarginPct > 100 {
+				utils.WriteErr(w, http.StatusUnprocessableEntity, "validation_error", "margin_pct must be between 0 and 100")
+				return
+			}
+			effectiveMargin = *in.MarginPct
+		}
+
+		effectiveTax := taxPct
+		if in.TaxPct != nil {
+			if *in.TaxPct < 0 || *in.TaxPct > 100 {
+				utils.WriteErr(w, http.StatusUnprocessableEntity, "validation_error", "tax_pct must be between 0 and 100")
+				return
+			}
+			effectiveTax = *in.TaxPct
+		}
+
+		effectiveCurrency := currency
+		if in.Currency != nil {
+			cur := strings.ToUpper(strings.TrimSpace(*in.Currency))
+			if len(cur) != 3 {
+				utils.WriteErr(w, http.StatusUnprocessableEntity, "validation_error", "currency must be a valid 3-letter ISO code")
+				return
+			}
+			effectiveCurrency = cur
+		}
+
+		var (
+			notesUpdated bool
+			newNotes     *string
+		)
+
+		if notesProvided {
+			notesUpdated = true
+			if string(*in.Notes) == "null" {
+				newNotes = nil
+			} else {
+				var noteStr string
+				if err := json.Unmarshal(*in.Notes, &noteStr); err != nil {
+					utils.WriteErr(w, http.StatusBadRequest, "validation_error", "notes must be a string or null")
+					return
+				}
+				trimmed := strings.TrimSpace(noteStr)
+				newNotes = &trimmed
+			}
+		}
+
+		effectiveStatus := status
+		var statusUpdated bool
+		if in.Status != nil {
+			s := strings.ToLower(strings.TrimSpace(*in.Status))
+			if s == "" {
+				utils.WriteErr(w, http.StatusUnprocessableEntity, "validation_error", "status cannot be empty")
+				return
+			}
+			allowedStatuses := map[string]struct{}{"draft": {}, "sent": {}, "accepted": {}, "rejected": {}}
+			if _, ok := allowedStatuses[s]; !ok {
+				utils.WriteErr(w, http.StatusUnprocessableEntity, "validation_error", "status must be one of draft,sent,accepted,rejected")
+				return
+			}
+			effectiveStatus = s
+			statusUpdated = true
+		}
+
+		needsRecalc := in.Items != nil || in.LaborHours != nil || in.LaborRate != nil || in.MarginPct != nil || in.TaxPct != nil
+
+		var (
+			newItemsJSON []byte
+			subtotalStr  string
+			totalStr     string
+		)
+
+		if needsRecalc {
+			itemsCalculated, subtotalOut, totalOut, err := calcTotals(CreateQuoteIn{
+				Items:      effectiveItems,
+				LaborHours: effectiveLaborHours,
+				LaborRate:  effectiveLaborRate,
+				MarginPct:  effectiveMargin,
+				TaxPct:     effectiveTax,
+			})
+			if err != nil {
+				utils.WriteErr(w, http.StatusUnprocessableEntity, "validation_error", err.Error())
+				return
+			}
+
+			subtotalStr = subtotalOut
+			totalStr = totalOut
+
+			newItemsJSON, err = json.Marshal(itemsCalculated)
+			if err != nil {
+				utils.WriteErr(w, http.StatusInternalServerError, "marshal_error", "failed to serialize items")
+				return
+			}
+		}
+
+		sets := []string{}
+		args := []any{}
+		idx := 1
+
+		if in.ClientID != nil {
+			sets = append(sets, fmt.Sprintf("client_id=$%d", idx))
+			args = append(args, effectiveClientID)
+			idx++
+		}
+
+		if in.Items != nil {
+			sets = append(sets, fmt.Sprintf("items=$%d", idx))
+			args = append(args, newItemsJSON)
+			idx++
+		}
+
+		if in.LaborHours != nil {
+			sets = append(sets, fmt.Sprintf("labor_hours=$%d", idx))
+			args = append(args, fmt.Sprintf("%.2f", effectiveLaborHours))
+			idx++
+		}
+
+		if in.LaborRate != nil {
+			sets = append(sets, fmt.Sprintf("labor_rate=$%d", idx))
+			args = append(args, fmt.Sprintf("%.2f", effectiveLaborRate))
+			idx++
+		}
+
+		if in.MarginPct != nil {
+			sets = append(sets, fmt.Sprintf("margin_pct=$%d", idx))
+			args = append(args, fmt.Sprintf("%.2f", effectiveMargin))
+			idx++
+		}
+
+		if in.TaxPct != nil {
+			sets = append(sets, fmt.Sprintf("tax_pct=$%d", idx))
+			args = append(args, fmt.Sprintf("%.2f", effectiveTax))
+			idx++
+		}
+
+		if in.Currency != nil {
+			sets = append(sets, fmt.Sprintf("currency=$%d", idx))
+			args = append(args, effectiveCurrency)
+			idx++
+		}
+
+		if notesUpdated {
+			sets = append(sets, fmt.Sprintf("notes=$%d", idx))
+			args = append(args, newNotes)
+			idx++
+		}
+
+		if statusUpdated {
+			sets = append(sets, fmt.Sprintf("status=$%d", idx))
+			args = append(args, effectiveStatus)
+			idx++
+		}
+
+		if needsRecalc {
+			sets = append(sets, fmt.Sprintf("subtotal=$%d", idx))
+			args = append(args, subtotalStr)
+			idx++
+
+			sets = append(sets, fmt.Sprintf("total=$%d", idx))
+			args = append(args, totalStr)
+			idx++
+		}
+
+		sets = append(sets, "updated_at=now()")
+
+		args = append(args, id)
+
+		query := fmt.Sprintf(`UPDATE quotes SET %s WHERE id=$%d RETURNING id, client_id, items, labor_hours, labor_rate, margin_pct, tax_pct,
+                               subtotal, total, currency, notes, public_id, status, created_at, updated_at`, strings.Join(sets, ", "), idx)
+
+		var q Quote
+		if err := pool.QueryRow(r.Context(), query, args...).Scan(
+			&q.ID, &q.ClientID, &q.Items, &q.LaborHours, &q.LaborRate, &q.MarginPct, &q.TaxPct,
+			&q.Subtotal, &q.Total, &q.Currency, &q.Notes, &q.PublicID, &q.Status, &q.CreatedAt, &q.UpdatedAt,
+		); err != nil {
+			utils.WriteErr(w, http.StatusInternalServerError, "db_error", err.Error())
+			return
+		}
+
+		utils.WriteJSON(w, http.StatusOK, q)
+	}
+}
+
 // calcTotals - Calculates quote totals with precise decimal arithmetic for financial accuracy
 // Purpose: Computes line totals, subtotals, taxes, and final totals using arbitrary precision math
 // Advantages:
